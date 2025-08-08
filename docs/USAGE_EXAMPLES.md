@@ -11,6 +11,15 @@ Bu sənəd ZCode.CorePackages library-lərinin bütün xüsusiyyətlərinin isti
 - [Business Rules](#business-rules)
 - [Entity Builders](#entity-builders)
 
+### 🎯 [Domain-Driven Design (DDD) Examples](#domain-driven-design-ddd-examples)
+- [Aggregate Root Implementation](#aggregate-root-implementation)
+- [Value Objects in DDD](#value-objects-in-ddd)
+- [Domain Services](#domain-services)
+- [Specification Pattern](#specification-pattern)
+- [Aggregate Repository](#aggregate-repository)
+- [Complete Order Aggregate Example](#complete-order-aggregate-example)
+- [DDD Best Practices](#ddd-best-practices)
+
 ### 🎯 [Application Layer Examples](#application-layer-examples)
 - [CQRS with MediatR](#cqrs-with-mediatr)
 - [Validation Pipeline](#validation-pipeline)
@@ -126,6 +135,512 @@ public class User : AuditableEntity<Guid>
 ```csharp
 var email = Email.Create("user@example.com");
 var user = new User(email, "John", "Doe");
+```
+
+## Domain-Driven Design (DDD) Examples
+
+### Aggregate Root Implementation
+
+#### 1. Creating an Aggregate Root
+```csharp
+public class Order : AggregateRoot<Guid>
+{
+    private readonly List<OrderItem> _orderItems = new();
+
+    public CustomerId CustomerId { get; private set; }
+    public OrderStatus Status { get; private set; }
+    public Money TotalAmount { get; private set; }
+    public DateTime OrderDate { get; private set; }
+    public Address ShippingAddress { get; private set; }
+
+    public IReadOnlyCollection<OrderItem> OrderItems => _orderItems.AsReadOnly();
+
+    public Order(CustomerId customerId, Address shippingAddress) : base(Guid.NewGuid())
+    {
+        CustomerId = customerId ?? throw new ArgumentNullException(nameof(customerId));
+        ShippingAddress = shippingAddress ?? throw new ArgumentNullException(nameof(shippingAddress));
+        Status = OrderStatus.Pending;
+        OrderDate = DateTime.UtcNow;
+        TotalAmount = Money.Zero("USD");
+
+        // Domain event
+        AddDomainEvent(new OrderCreatedEvent(Id, CustomerId.Value, OrderDate));
+    }
+
+    public void AddOrderItem(ProductId productId, Money unitPrice, int quantity)
+    {
+        // Business rule enforcement
+        if (Status != OrderStatus.Pending)
+            throw new InvalidOperationException("Cannot add items to a non-pending order");
+
+        if (quantity <= 0)
+            throw new ArgumentException("Quantity must be positive", nameof(quantity));
+
+        var existingItem = _orderItems.FirstOrDefault(x => x.ProductId == productId);
+        if (existingItem != null)
+        {
+            existingItem.UpdateQuantity(existingItem.Quantity + quantity);
+        }
+        else
+        {
+            var orderItem = new OrderItem(productId, unitPrice, quantity);
+            _orderItems.Add(orderItem);
+        }
+
+        RecalculateTotal();
+        AddDomainEvent(new OrderItemAddedEvent(Id, productId.Value, quantity));
+    }
+
+    public void ConfirmOrder()
+    {
+        if (Status != OrderStatus.Pending)
+            throw new InvalidOperationException("Only pending orders can be confirmed");
+
+        if (!_orderItems.Any())
+            throw new InvalidOperationException("Cannot confirm order without items");
+
+        Status = OrderStatus.Confirmed;
+        AddDomainEvent(new OrderConfirmedEvent(Id, TotalAmount.Amount));
+    }
+
+    // Aggregate validation
+    public override bool IsValid()
+    {
+        return CustomerId != null &&
+               ShippingAddress != null &&
+               TotalAmount != null &&
+               TotalAmount.Amount >= 0;
+    }
+
+    private void RecalculateTotal()
+    {
+        var total = _orderItems.Sum(item => item.TotalPrice.Amount);
+        TotalAmount = new Money(total, TotalAmount.Currency);
+    }
+}
+```
+
+### Value Objects in DDD
+
+#### 1. Money Value Object
+```csharp
+public class Money : ValueObject
+{
+    public decimal Amount { get; }
+    public string Currency { get; }
+
+    public Money(decimal amount, string currency)
+    {
+        if (amount < 0)
+            throw new ArgumentException("Amount cannot be negative", nameof(amount));
+
+        if (string.IsNullOrWhiteSpace(currency))
+            throw new ArgumentException("Currency is required", nameof(currency));
+
+        Amount = amount;
+        Currency = currency.ToUpperInvariant();
+    }
+
+    public static Money Zero(string currency) => new(0, currency);
+
+    public Money Add(Money other)
+    {
+        if (Currency != other.Currency)
+            throw new InvalidOperationException("Cannot add money with different currencies");
+
+        return new Money(Amount + other.Amount, Currency);
+    }
+
+    protected override IEnumerable<object> GetEqualityComponents()
+    {
+        yield return Amount;
+        yield return Currency;
+    }
+}
+```
+
+#### 2. Address Value Object
+```csharp
+public class Address : ValueObject
+{
+    public string Street { get; }
+    public string City { get; }
+    public string State { get; }
+    public string ZipCode { get; }
+    public string Country { get; }
+
+    public Address(string street, string city, string state, string zipCode, string country)
+    {
+        Street = street ?? throw new ArgumentNullException(nameof(street));
+        City = city ?? throw new ArgumentNullException(nameof(city));
+        State = state ?? throw new ArgumentNullException(nameof(state));
+        ZipCode = zipCode ?? throw new ArgumentNullException(nameof(zipCode));
+        Country = country ?? throw new ArgumentNullException(nameof(country));
+    }
+
+    protected override IEnumerable<object> GetEqualityComponents()
+    {
+        yield return Street;
+        yield return City;
+        yield return State;
+        yield return ZipCode;
+        yield return Country;
+    }
+}
+```
+
+### Domain Services
+
+#### 1. Order Domain Service
+```csharp
+public class OrderDomainService : IDomainService
+{
+    public bool CanOrderBeShipped(Order order, DateTime currentDate)
+    {
+        // Business rule: Orders can only be shipped on weekdays
+        if (currentDate.DayOfWeek == DayOfWeek.Saturday || currentDate.DayOfWeek == DayOfWeek.Sunday)
+            return false;
+
+        if (order.Status != OrderStatus.Confirmed)
+            return false;
+
+        if (!order.OrderItems.Any())
+            return false;
+
+        return true;
+    }
+
+    public decimal CalculateShippingCost(Order order, Address destinationAddress)
+    {
+        var baseShippingCost = 10.00m;
+        var weightMultiplier = order.OrderItems.Count * 2.50m;
+
+        // International shipping costs more
+        if (destinationAddress.Country != order.ShippingAddress.Country)
+        {
+            baseShippingCost *= 2;
+        }
+
+        // Free shipping for orders over $100
+        if (order.TotalAmount.Amount >= 100)
+        {
+            return 0;
+        }
+
+        return baseShippingCost + weightMultiplier;
+    }
+}
+```
+
+### Specification Pattern
+
+#### 1. Order Specifications
+```csharp
+public class OrdersByCustomerSpecification : BaseSpecification<Order>
+{
+    public OrdersByCustomerSpecification(Guid customerId)
+        : base(order => order.CustomerId.Value == customerId)
+    {
+        AddInclude(order => order.OrderItems);
+        AddOrderByDescending(order => order.OrderDate);
+    }
+}
+
+public class OrdersByStatusSpecification : BaseSpecification<Order>
+{
+    public OrdersByStatusSpecification(OrderStatus status)
+        : base(order => order.Status == status)
+    {
+        AddInclude(order => order.OrderItems);
+        AddOrderBy(order => order.OrderDate);
+    }
+}
+
+public class OrdersWithMinimumAmountSpecification : BaseSpecification<Order>
+{
+    public OrdersWithMinimumAmountSpecification(decimal minimumAmount, string currency)
+        : base(order => order.TotalAmount.Amount >= minimumAmount && order.TotalAmount.Currency == currency)
+    {
+        AddInclude(order => order.OrderItems);
+        AddOrderByDescending(order => order.TotalAmount.Amount);
+    }
+}
+```
+
+### Aggregate Repository
+
+#### 1. Repository Registration
+```csharp
+// Program.cs
+builder.Services.AddPersistenceServices<ApplicationDbContext>();
+builder.Services.AddDddRepositories<ApplicationDbContext>();
+
+// Or register specific repositories
+builder.Services.AddScoped<IAggregateSpecificationRepository<Order, Guid>, OrderRepository>();
+```
+
+#### 2. Custom Aggregate Repository
+```csharp
+public class OrderRepository : EfAggregateSpecificationRepositoryBase<Order, Guid, ApplicationDbContext>
+{
+    public OrderRepository(ApplicationDbContext context) : base(context)
+    {
+    }
+
+    // Custom methods specific to Order aggregate
+    public async Task<List<Order>> GetOrdersReadyToShipAsync()
+    {
+        var specification = new OrdersReadyToShipSpecification();
+        return (await GetListAsync(specification)).ToList();
+    }
+
+    public async Task<Order?> GetOrderWithItemsAsync(Guid orderId)
+    {
+        var specification = new OrdersByIdWithItemsSpecification(orderId);
+        return await GetAsync(specification);
+    }
+
+    // Optimistic concurrency example
+    public async Task<Order> UpdateOrderWithConcurrencyCheckAsync(Order order, int expectedVersion)
+    {
+        return await SaveAsync(order, expectedVersion);
+    }
+}
+```
+
+#### 3. Using Specifications in Repository
+```csharp
+public class OrderService
+{
+    private readonly IAggregateSpecificationRepository<Order, Guid> _orderRepository;
+
+    public async Task<List<Order>> GetCustomerOrdersAsync(Guid customerId)
+    {
+        var specification = new OrdersByCustomerSpecification(customerId);
+        return await _orderRepository.GetListAsync(specification);
+    }
+
+    public async Task<List<Order>> GetPendingOrdersAsync()
+    {
+        var specification = new OrdersByStatusSpecification(OrderStatus.Pending);
+        return await _orderRepository.GetListAsync(specification);
+    }
+
+    public async Task<List<Order>> GetHighValueOrdersAsync(decimal minimumAmount)
+    {
+        var specification = new OrdersWithMinimumAmountSpecification(minimumAmount, "USD");
+        return await _orderRepository.GetListAsync(specification);
+    }
+
+    // Combining specifications
+    public async Task<List<Order>> GetCustomerPendingOrdersAsync(Guid customerId)
+    {
+        var customerSpec = new OrdersByCustomerSpecification(customerId);
+        var pendingSpec = new OrdersByStatusSpecification(OrderStatus.Pending);
+        var combinedSpec = customerSpec.And(pendingSpec);
+
+        return await _orderRepository.GetListAsync(combinedSpec);
+    }
+}
+```
+
+### DDD Best Practices
+
+#### 1. Automatic Database-Specific Concurrency Configuration
+```csharp
+// No need to add concurrency properties to your aggregates!
+// BaseDbContext automatically configures database-specific concurrency control
+
+public class Order : AggregateRoot<Guid>
+{
+    // No concurrency property needed! ✅
+    // Configured automatically based on database provider:
+    // - PostgreSQL: xmin system column (shadow property)
+    // - SQL Server: rowversion/timestamp (shadow property)
+    // - MySQL: timestamp column (shadow property)
+    // - Others: Version integer property (fallback)
+
+    public CustomerId CustomerId { get; private set; }
+    public OrderStatus Status { get; private set; }
+    public Money TotalAmount { get; private set; }
+    // ... other properties
+}
+
+public class ApplicationDbContext : BaseDbContext
+{
+    public ApplicationDbContext(DbContextOptions<ApplicationDbContext> options) : base(options)
+    {
+    }
+
+    public DbSet<Order> Orders { get; set; }
+    public DbSet<Product> Products { get; set; }
+    public DbSet<Customer> Customers { get; set; }
+
+    // All aggregates automatically get database-specific concurrency:
+    // 🐘 PostgreSQL: xmin system column (uint)
+    // 🏢 SQL Server: rowversion/timestamp (byte[])
+    // 🐬 MySQL: timestamp column (DateTime)
+    // 📦 SQLite/Others: Version integer (int)
+}
+```
+
+#### 2. Custom Aggregate Configuration (Optional)
+```csharp
+// If you need custom configuration, inherit from AggregateRootConfiguration
+public class OrderConfiguration : AggregateRootConfiguration<Order, Guid>
+{
+    protected override void ConfigureAggregate(EntityTypeBuilder<Order> builder)
+    {
+        // RowVersion property is already configured by base class!
+        // builder.Property(x => x.RowVersion).IsRowVersion(); // ✅ Already done!
+
+        // Configure only your specific properties
+        builder.ToTable("Orders");
+
+        builder.OwnsOne(o => o.TotalAmount, mb =>
+        {
+            mb.Property(m => m.Amount)
+              .HasColumnName("TotalAmount")
+              .HasColumnType("decimal(18,2)");
+
+            mb.Property(m => m.Currency)
+              .HasColumnName("Currency")
+              .HasMaxLength(3);
+        });
+
+        // Navigation properties
+        builder.HasMany<OrderItem>()
+               .WithOne()
+               .HasForeignKey("OrderId");
+    }
+}
+```
+
+#### 3. Database-Specific Concurrency Usage in Service Layer
+```csharp
+public class OrderService
+{
+    private readonly IAggregateRepository<Order, Guid> _orderRepository;
+    private readonly DbContext _context;
+
+    public async Task UpdateOrderAsync(Guid orderId, UpdateOrderCommand command)
+    {
+        // 1. Get order
+        var order = await _orderRepository.GetByIdAsync(orderId);
+        if (order == null) throw new NotFoundException("Order not found");
+
+        // 2. Get current concurrency token (database-specific type)
+        var currentToken = _orderRepository.GetConcurrencyToken(order);
+        // PostgreSQL: uint (xmin)
+        // SQL Server: byte[] (rowversion)
+        // MySQL: DateTime (timestamp)
+        // Others: int (version)
+
+        // 3. Apply business logic
+        order.UpdateShippingAddress(command.NewAddress);
+        order.AddOrderItem(command.ProductId, command.UnitPrice, command.Quantity);
+
+        // 4. Save with optimistic concurrency check
+        try
+        {
+            await _orderRepository.SaveAsync(order, currentToken);
+        }
+        catch (ConcurrencyException)
+        {
+            throw new BusinessException("Order was modified by another user. Please refresh and try again.");
+        }
+    }
+
+    // Get order with concurrency token for client-side tracking
+    public async Task<OrderWithConcurrencyDto> GetOrderWithConcurrencyTokenAsync(Guid orderId)
+    {
+        var order = await _orderRepository.GetByIdAsync(orderId);
+        if (order == null) return null;
+
+        var concurrencyToken = _orderRepository.GetConcurrencyToken(order);
+
+        return new OrderWithConcurrencyDto
+        {
+            Id = order.Id,
+            Status = order.Status.ToString(),
+            TotalAmount = order.TotalAmount.Amount,
+            ConcurrencyToken = concurrencyToken // Database-specific token
+        };
+    }
+}
+
+// Database-specific concurrency token examples:
+public class OrderWithConcurrencyDto
+{
+    public Guid Id { get; set; }
+    public string Status { get; set; } = string.Empty;
+    public decimal TotalAmount { get; set; }
+    public object ConcurrencyToken { get; set; } = null!; // Can be uint, byte[], DateTime, or int
+}
+```
+
+#### 4. Database Provider Examples
+```csharp
+// PostgreSQL Configuration
+services.AddDbContext<ApplicationDbContext>(options =>
+    options.UseNpgsql(connectionString));
+// Result: xmin system column (uint) for concurrency
+
+// SQL Server Configuration
+services.AddDbContext<ApplicationDbContext>(options =>
+    options.UseSqlServer(connectionString));
+// Result: rowversion/timestamp (byte[]) for concurrency
+
+// MySQL Configuration
+services.AddDbContext<ApplicationDbContext>(options =>
+    options.UseMySql(connectionString, ServerVersion.AutoDetect(connectionString)));
+// Result: timestamp column (DateTime) for concurrency
+
+// SQLite Configuration (fallback)
+services.AddDbContext<ApplicationDbContext>(options =>
+    options.UseSqlite(connectionString));
+// Result: Version integer (int) for concurrency
+}
+```
+
+#### 4. Global Configuration Benefits
+```csharp
+// ✅ Automatic optimistic concurrency with SQL Server RowVersion
+// ✅ No repetitive RowVersion property configuration
+// ✅ Database-managed concurrency tokens (more efficient than manual versioning)
+// ✅ Consistent audit field configuration
+// ✅ Automatic soft delete filters
+// ✅ Domain events automatically ignored
+
+// Before (manual configuration for each aggregate):
+public class OrderConfiguration : IEntityTypeConfiguration<Order>
+{
+    public void Configure(EntityTypeBuilder<Order> builder)
+    {
+        builder.Property(x => x.RowVersion).IsRowVersion(); // Repetitive!
+        builder.Ignore(x => x.DomainEvents);                // Repetitive!
+        // ... other configurations
+    }
+}
+
+// After (automatic configuration):
+public class OrderConfiguration : AggregateRootConfiguration<Order, Guid>
+{
+    protected override void ConfigureAggregate(EntityTypeBuilder<Order> builder)
+    {
+        // RowVersion and DomainEvents already configured!
+        // Focus only on business-specific configurations
+    }
+}
+```
+
+#### 4. Service Registration
+```csharp
+// Program.cs
+builder.Services.AddDbContext<ApplicationDbContext>(options =>
+    options.UseSqlServer(connectionString));
+
+// All aggregate configurations are applied automatically!
 ```
 
 ### Specifications
