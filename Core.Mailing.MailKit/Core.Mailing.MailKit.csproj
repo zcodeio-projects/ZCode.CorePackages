@@ -1,0 +1,32 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+	  <TargetFramework>net9.0</TargetFramework>
+	  <ImplicitUsings>enable</ImplicitUsings>
+	  <Nullable>enable</Nullable>
+	  <Version>1.0.0</Version>
+	  <RootNamespace>ZCode.$(AssemblyName)</RootNamespace>
+	  <GeneratePackageOnBuild>True</GeneratePackageOnBuild>
+	  <PackageId>ZCode.$(AssemblyName)</PackageId>
+	  <Title>ZCode $(AssemblyName)</Title>
+	  <Description>Provides mailing implementations</Description>
+	  <Product>ZCode</Product>
+	  <Authors>ZCode.io, Contributors</Authors>
+	  <Company>ZCode.io</Company>
+	  <PackageIconUrl>ZCode.ico</PackageIconUrl>
+	  <PackageTags>
+		  Clean Architecture, Union Architecture,
+		  Encryption,Mailing, SMTP, Email Service, Email Utility, Mailkit, SendGrid, Email Sender
+	  </PackageTags>
+	  <RepositoryUrl>https://github.com/zahid2000/ZCode.CorePackages</RepositoryUrl>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="MailKit" Version="4.14.1" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Core.Mailing\Core.Mailing.csproj" />
+  </ItemGroup>
+
+</Project>
